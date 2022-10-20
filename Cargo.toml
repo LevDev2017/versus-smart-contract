@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "state/",
+    "proxy/",
+    "implementation/"
+]

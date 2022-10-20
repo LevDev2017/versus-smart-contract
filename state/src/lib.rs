@@ -25,13 +25,14 @@ struct State<S> {
     paused:             bool,
 }
 
-#[derive(Debug, Serialize, SchemaType)]
+#[derive(Debug, Serialize, SchemaType, Clone, Copy, PartialEq)]
 enum PlayerState {
+    NotAdded,
     Active,
     Suspended
 }
 
-#[derive(Debug, Serialize, SchemaType)]
+#[derive(Debug, Serialize, SchemaType, Clone, Copy)]
 enum BattleResult {
     NoResult,
     Win,
@@ -91,20 +92,6 @@ struct UpdateBattleResultParams {
     result: BattleResult,
 }
 
-/// The parameter type for the state contract function `addPlayer`.
-#[derive(Serialize, SchemaType)]
-struct AddPlayerParams {
-    /// Player to add.
-    player: Address,
-}
-
-/// The parameter type for the state contract function `getPlayerData`.
-#[derive(Serialize, SchemaType)]
-struct GetPlayerDataParams {
-    /// Player to get data
-    player: Address,
-}
-
 /// The return type for the state contract function `view`.
 #[derive(Serialize, SchemaType)]
 struct ReturnBasicState {
@@ -123,10 +110,12 @@ enum CustomContractError {
     #[from(ParseError)]
     ParseParamsError,
     /// Your error
+    /// Failed logging: Log is full.
+    LogFull,
+    /// Failed logging: Log is malformed.
+    LogMalformed,
     /// Failed to invoke a contract.
     InvokeContractError,
-    /// Contract is paused.
-    ContractPaused,
     /// Contract already initialized.
     AlreadyInitialized,
     /// Contract not initialized.
@@ -135,9 +124,9 @@ enum CustomContractError {
     OnlyImplementation,
     /// Only proxy contract.
     OnlyProxy,
-    /// Raised when implementation/proxy can not invoke state contract.
-    StateInvokeError,
 }
+
+type ContractResult<A> = Result<A, CustomContractError>;
 
 /// Mapping the logging errors to ContractError.
 impl From<LogError> for CustomContractError {
@@ -384,7 +373,7 @@ fn contract_state_update_battle_result<S: HasStateApi>(
 #[receive(
     contract = "Versus-State",
     name = "addPlayer",
-    parameter = "AddPlayerParams",
+    parameter = "Address",
     error = "CustomContractError",
     mutable
 )]
@@ -398,10 +387,10 @@ fn contract_state_set_player_data<S: HasStateApi>(
     only_implementation(implementation_address, ctx.sender())?;
 
     // add new player.
-    let params: AddPlayerParams = ctx.parameter_cursor().get()?;
+    let params: Address = ctx.parameter_cursor().get()?;
     let (state, _state_builder) = host.state_and_builder();
 
-    let mut player_data = state.player_data.entry(params.player).or_insert_with(|| PlayerData {
+    state.player_data.entry(params).or_insert_with(|| PlayerData {
         state:   PlayerState::Active,
         result:  BattleResult::NoResult,
     });
@@ -427,18 +416,39 @@ fn contract_state_get_paused<S: HasStateApi>(
 #[receive(
     contract = "Versus-State",
     name = "getPlayerData",
-    parameter = "GetPlayerDataParams",
+    parameter = "Address",
     return_value = "(PlayerState, BattleResult)",
     error = "CustomContractError"
 )]
 fn contract_state_get_player_data<S: HasStateApi>(
-    _ctx: &impl HasReceiveContext,
+    ctx: &impl HasReceiveContext,
     host: &impl HasHost<State<S>, StateApiType = S>,
 ) -> ContractResult<(PlayerState, BattleResult)> {
-    let params: AddPlayerParams = ctx.parameter_cursor().get()?;
+    let params: Address = ctx.parameter_cursor().get()?;
     
-    let player_data: PlayerData = host.state().player_data.entry(params.player);
-    Ok((player_data.state, player_data.result))
+    let player_state = host.state().player_data.get(&params).unwrap().state;
+    let player_result = host.state().player_data.get(&params).unwrap().result;
+
+    Ok((player_state, player_result))
+}
+
+/// Get player data.
+#[receive(
+    contract = "Versus-State",
+    name = "isAdded",
+    parameter = "Address",
+    return_value = "bool",
+    error = "CustomContractError"
+)]
+fn contract_state_is_added<S: HasStateApi>(
+    ctx: &impl HasReceiveContext,
+    host: &impl HasHost<State<S>, StateApiType = S>,
+) -> ContractResult<bool> {
+    let params: Address = ctx.parameter_cursor().get()?;
+    
+    let player_state = host.state().player_data.get(&params).unwrap().state;
+
+    Ok(player_state != PlayerState::NotAdded)
 }
 
 /// Function to view state of the state contract.
@@ -462,73 +472,73 @@ fn contract_state_view<S: HasStateApi>(
     Ok(state)
 }
 
-#[concordium_cfg_test]
-mod tests {
-    use super::*;
-    use test_infrastructure::*;
+// #[concordium_cfg_test]
+// mod tests {
+//     use super::*;
+//     use test_infrastructure::*;
 
-    type ContractResult<A> = Result<A, Error>;
+//     type ContractResult<A> = Result<A, Error>;
 
-    #[concordium_test]
-    /// Test that initializing the contract succeeds with some state.
-    fn test_init() {
-        let ctx = TestInitContext::empty();
+//     #[concordium_test]
+//     /// Test that initializing the contract succeeds with some state.
+//     fn test_init() {
+//         let ctx = TestInitContext::empty();
 
-        let mut state_builder = TestStateBuilder::new();
+//         let mut state_builder = TestStateBuilder::new();
 
-        let state_result = init(&ctx, &mut state_builder);
-        state_result.expect_report("Contract initialization results in error");
-    }
+//         let state_result = init(&ctx, &mut state_builder);
+//         state_result.expect_report("Contract initialization results in error");
+//     }
 
-    #[concordium_test]
-    /// Test that invoking the `receive` endpoint with the `false` parameter
-    /// succeeds in updating the contract.
-    fn test_throw_no_error() {
-        let ctx = TestInitContext::empty();
+//     #[concordium_test]
+//     /// Test that invoking the `receive` endpoint with the `false` parameter
+//     /// succeeds in updating the contract.
+//     fn test_throw_no_error() {
+//         let ctx = TestInitContext::empty();
 
-        let mut state_builder = TestStateBuilder::new();
+//         let mut state_builder = TestStateBuilder::new();
 
-        // Initializing state
-        let initial_state = init(&ctx, &mut state_builder).expect("Initialization should pass");
+//         // Initializing state
+//         let initial_state = init(&ctx, &mut state_builder).expect("Initialization should pass");
 
-        let mut ctx = TestReceiveContext::empty();
+//         let mut ctx = TestReceiveContext::empty();
 
-        let throw_error = false;
-        let parameter_bytes = to_bytes(&throw_error);
-        ctx.set_parameter(&parameter_bytes);
+//         let throw_error = false;
+//         let parameter_bytes = to_bytes(&throw_error);
+//         ctx.set_parameter(&parameter_bytes);
 
-        let mut host = TestHost::new(initial_state, state_builder);
+//         let mut host = TestHost::new(initial_state, state_builder);
 
-        // Call the contract function.
-        let result: ContractResult<()> = receive(&ctx, &mut host);
+//         // Call the contract function.
+//         let result: ContractResult<()> = receive(&ctx, &mut host);
 
-        // Check the result.
-        claim!(result.is_ok(), "Results in rejection");
-    }
+//         // Check the result.
+//         claim!(result.is_ok(), "Results in rejection");
+//     }
 
-    #[concordium_test]
-    /// Test that invoking the `receive` endpoint with the `true` parameter
-    /// results in the `YourError` being thrown.
-    fn test_throw_error() {
-        let ctx = TestInitContext::empty();
+//     #[concordium_test]
+//     /// Test that invoking the `receive` endpoint with the `true` parameter
+//     /// results in the `YourError` being thrown.
+//     fn test_throw_error() {
+//         let ctx = TestInitContext::empty();
 
-        let mut state_builder = TestStateBuilder::new();
+//         let mut state_builder = TestStateBuilder::new();
 
-        // Initializing state
-        let initial_state = init(&ctx, &mut state_builder).expect("Initialization should pass");
+//         // Initializing state
+//         let initial_state = init(&ctx, &mut state_builder).expect("Initialization should pass");
 
-        let mut ctx = TestReceiveContext::empty();
+//         let mut ctx = TestReceiveContext::empty();
 
-        let throw_error = true;
-        let parameter_bytes = to_bytes(&throw_error);
-        ctx.set_parameter(&parameter_bytes);
+//         let throw_error = true;
+//         let parameter_bytes = to_bytes(&throw_error);
+//         ctx.set_parameter(&parameter_bytes);
 
-        let mut host = TestHost::new(initial_state, state_builder);
+//         let mut host = TestHost::new(initial_state, state_builder);
 
-        // Call the contract function.
-        let error: ContractResult<()> = receive(&ctx, &mut host);
+//         // Call the contract function.
+//         let error: ContractResult<()> = receive(&ctx, &mut host);
 
-        // Check the result.
-        claim_eq!(error, Err(Error::YourError), "Function should throw an error.");
-    }
-}
+//         // Check the result.
+//         claim_eq!(error, Err(Error::YourError), "Function should throw an error.");
+//     }
+// }
